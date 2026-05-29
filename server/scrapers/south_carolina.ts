@@ -650,24 +650,19 @@ async function scrapeMarionCounty(fromDate: string, toDate: string): Promise<Lea
 export async function scrapeSC(county: string, fromDate: string, toDate: string): Promise<Lead[]> {
   const leads: Lead[] = [];
 
+  // Only include lead types that reliably return a property address
+  // SKIPPED: HorryPreForeclosure (null address), HorryProbate (null address), Georgetown/Marion (null address)
   switch (county.toLowerCase()) {
     case "horry":
       leads.push(
-        ...(await scrapeHorryPreForeclosure(fromDate, toDate)),
-        ...(await scrapeHorryForeclosure(fromDate, toDate)),
-        ...(await scrapeHorryTaxDelinquent(fromDate, toDate)),
-        ...(await scrapeHorryProbate(fromDate, toDate)),
-        ...(await scrapeHorrySheriffSales(fromDate, toDate)),
+        ...(await scrapeHorryForeclosure(fromDate, toDate)),    // address in source
+        ...(await scrapeHorryTaxDelinquent(fromDate, toDate)),  // address in source
+        ...(await scrapeHorrySheriffSales(fromDate, toDate)),   // address in source
       );
       break;
-    case "georgetown":
-      leads.push(...(await scrapeGeorgetownCounty(fromDate, toDate)));
-      break;
-    case "marion":
-      leads.push(...(await scrapeMarionCounty(fromDate, toDate)));
-      break;
+    // Georgetown and Marion scrapers return null addresses — skipped until improved
     default:
-      console.warn(`[SC] No scraper for county: ${county}`);
+      console.warn(`[SC] No scraper with address data for county: ${county}`);
   }
 
   return leads;
@@ -795,9 +790,15 @@ export async function scrapeObituaries(fromDate: string, toDate: string): Promis
 // ─── CODE VIOLATIONS — South Carolina municipal portals ─────────────────────────
 export async function scrapeCodeViolations(fromDate: string, toDate: string): Promise<Lead[]> {
   const leads: Lead[] = [];
+  // CourtListener API — South Carolina district court civil cases (code enforcement)
   try {
-    const url = `https://www.courtlistener.com/api/rest/v4/dockets/?court=scd&date_filed__gte=${fromDate}&date_filed__lte=${toDate}&nature_of_suit=440&order_by=-date_filed&page_size=50`;
-    const res = await fetchWithRetry(url, { headers: { "User-Agent": "Atlas/1.0", Accept: "application/json" } });
+    const url =
+      `https://www.courtlistener.com/api/rest/v4/dockets/` +
+      `?court=scd&date_filed__gte=${fromDate}&date_filed__lte=${toDate}` +
+      `&nature_of_suit=440&order_by=-date_filed&page_size=50`;
+    const res = await fetchWithRetry(url, {
+      headers: { "User-Agent": "Atlas/1.0 (atlas@easybuttonrealestate.com)", Accept: "application/json" },
+    });
     if (res.ok) {
       const data = await res.json() as { results?: unknown[] };
       for (const r of (data?.results || []) as Record<string, unknown>[]) {
@@ -805,10 +806,111 @@ export async function scrapeCodeViolations(fromDate: string, toDate: string): Pr
         const caseNum = String(r.docket_number || "");
         const filedDate = String(r.date_filed || "");
         if (!caseName && !caseNum) continue;
-        leads.push({ id: makeId("CV", caseNum || caseName, "SC", "code"), county: "SC", state: "SC", lead_type: "Code Violation", owner_name: caseName || null, address: null, city: null, zip: null, mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null, case_number: caseNum || null, filing_date: formatDate(filedDate), assessed_value: null, tax_year: null, lender: null, loan_amount: null, sale_date: null, sale_amount: null, description: `Code Violation — ${caseName || caseNum}`, source_url: r.absolute_url ? `https://www.courtlistener.com${r.absolute_url}` : "https://www.courtlistener.com/", raw_data: JSON.stringify({ caseName, caseNum, filedDate }) });
+        leads.push({
+          id: makeId("CV", caseNum || caseName, "SC", "code"),
+          county: "SC",
+          state: "SC",
+          lead_type: "Code Violation",
+          owner_name: caseName || null,
+          address: null, city: null, zip: null,
+          mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null,
+          case_number: caseNum || null,
+          filing_date: formatDate(filedDate),
+          assessed_value: null, tax_year: null,
+          lender: null, loan_amount: null, sale_date: null, sale_amount: null,
+          description: `Code Violation / Civil Rights — ${caseName || caseNum}`,
+          source_url: r.absolute_url ? `https://www.courtlistener.com${r.absolute_url}` : "https://www.courtlistener.com/",
+          raw_data: JSON.stringify({ caseName, caseNum, filedDate }),
+        });
       }
     }
-  } catch (e) { console.error("[SC] Code Violations error:", e); }
+  } catch (e) {
+    console.error("[SC] Code Violations error:", e);
+  }
+  return leads;
+}
+
+// ─── OUT-OF-STATE OWNERS — CourtListener South Carolina ─────────────────────────
+export async function scrapeOutOfStateOwners(fromDate: string, toDate: string): Promise<Lead[]> {
+  const leads: Lead[] = [];
+  // Use CourtListener to find absentee/out-of-state property cases
+  try {
+    const url =
+      `https://www.courtlistener.com/api/rest/v4/dockets/` +
+      `?court=scd&date_filed__gte=${fromDate}&date_filed__lte=${toDate}` +
+      `&nature_of_suit=290&order_by=-date_filed&page_size=50`;
+    const res = await fetchWithRetry(url, {
+      headers: { "User-Agent": "Atlas/1.0 (atlas@easybuttonrealestate.com)", Accept: "application/json" },
+    });
+    if (res.ok) {
+      const data = await res.json() as { results?: unknown[] };
+      for (const r of (data?.results || []) as Record<string, unknown>[]) {
+        const caseName = String(r.case_name || "");
+        const caseNum = String(r.docket_number || "");
+        const filedDate = String(r.date_filed || "");
+        if (!caseName && !caseNum) continue;
+        leads.push({
+          id: makeId("OOS", caseNum || caseName, "SC", "oos"),
+          county: "SC",
+          state: "SC",
+          lead_type: "Vacant/Abandoned",
+          owner_name: caseName || null,
+          address: null, city: null, zip: null,
+          mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null,
+          case_number: caseNum || null,
+          filing_date: formatDate(filedDate),
+          assessed_value: null, tax_year: null,
+          lender: null, loan_amount: null, sale_date: null, sale_amount: null,
+          description: `Out-of-State Owner / Property Dispute — ${caseName || caseNum}`,
+          source_url: r.absolute_url ? `https://www.courtlistener.com${r.absolute_url}` : "https://www.courtlistener.com/",
+          raw_data: JSON.stringify({ caseName, caseNum, filedDate }),
+        });
+      }
+    }
+  } catch (e) {
+    console.error("[SC] Out-of-State Owners error:", e);
+  }
+  return leads;
+}
+
+// ─── VACANT / ABANDONED — South Carolina PACER civil RSS ────────────────────────
+export async function scrapeVacantAbandoned(fromDate: string, toDate: string): Promise<Lead[]> {
+  const leads: Lead[] = [];
+  try {
+    const rssRes = await fetchWithRetry("https://ecf.scb.uscourts.gov/cgi-bin/rss_outside.pl");
+    if (rssRes.ok) {
+      const xml = await rssRes.text();
+      const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+      for (const item of items) {
+        const title = (item.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) || item.match(/<title>(.+?)<\/title>/))?.[1]?.trim() || "";
+        const link = (item.match(/<link>(.+?)<\/link>/))?.[1]?.trim() || "";
+        const pubDate = (item.match(/<pubDate>(.+?)<\/pubDate>/))?.[1]?.trim() || "";
+        const desc = (item.match(/<description><!\[CDATA\[(.+?)\]\]><\/description>/) || item.match(/<description>(.+?)<\/description>/))?.[1]?.trim() || "";
+        if (!title) continue;
+        const lower = (title + " " + desc).toLowerCase();
+        // Chapter 7 liquidations often involve vacant/abandoned properties
+        if (!lower.includes("chapter 7") && !lower.includes("vacant") && !lower.includes("abandon")) continue;
+        leads.push({
+          id: makeId("VAC", title, "SC", "vacant"),
+          county: "SC",
+          state: "SC",
+          lead_type: "Vacant/Abandoned",
+          owner_name: title.split(/\s+v\.?\s+/i)[0]?.trim() || title,
+          address: null, city: null, zip: null,
+          mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null,
+          case_number: null,
+          filing_date: pubDate ? formatDate(new Date(pubDate).toISOString().slice(0,10)) : formatDate(fromDate),
+          assessed_value: null, tax_year: null,
+          lender: null, loan_amount: null, sale_date: null, sale_amount: null,
+          description: `Vacant/Abandoned — Chapter 7 Liquidation — ${title}`,
+          source_url: link || "https://ecf.scb.uscourts.gov/cgi-bin/rss_outside.pl",
+          raw_data: JSON.stringify({ title, pubDate, desc }),
+        });
+      }
+    }
+  } catch (e) {
+    console.error("[SC] Vacant/Abandoned error:", e);
+  }
   return leads;
 }
 
@@ -828,53 +930,28 @@ export async function scrapeDivorce(fromDate: string, toDate: string): Promise<L
         if (!title) continue;
         const lower = (title + " " + desc).toLowerCase();
         if (!lower.includes("matrimon") && !lower.includes("divorce") && !lower.includes("dissolution") && !lower.includes("evict")) continue;
-        leads.push({ id: makeId("DIV", title, "SC", "divorce"), county: "SC", state: "SC", lead_type: "Divorce", owner_name: title.split(/\s+v\.?\s+/i).join(" & "), address: null, city: null, zip: null, mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null, case_number: null, filing_date: pubDate ? formatDate(new Date(pubDate).toISOString().slice(0,10)) : formatDate(fromDate), assessed_value: null, tax_year: null, lender: null, loan_amount: null, sale_date: null, sale_amount: null, description: `Divorce / Eviction — ${title}`, source_url: link || "https://ecf.scd.uscourts.gov/cgi-bin/rss_outside.pl", raw_data: JSON.stringify({ title, pubDate, desc }) });
+        const parts = title.split(/\s+v\.?\s+/i);
+        leads.push({
+          id: makeId("DIV", title, "SC", "divorce"),
+          county: "SC",
+          state: "SC",
+          lead_type: "Divorce",
+          owner_name: parts.join(" & ") || title,
+          address: null, city: null, zip: null,
+          mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null,
+          case_number: null,
+          filing_date: pubDate ? formatDate(new Date(pubDate).toISOString().slice(0,10)) : formatDate(fromDate),
+          assessed_value: null, tax_year: null,
+          lender: null, loan_amount: null, sale_date: null, sale_amount: null,
+          description: `Divorce / Eviction — ${title}`,
+          source_url: link || "https://ecf.scd.uscourts.gov/cgi-bin/rss_outside.pl",
+          raw_data: JSON.stringify({ title, pubDate, desc }),
+        });
       }
     }
-  } catch (e) { console.error("[SC] Divorce/Eviction error:", e); }
-  return leads;
-}
-
-// ─── OUT-OF-STATE OWNERS — CourtListener South Carolina ─────────────────────────
-export async function scrapeOutOfStateOwners(fromDate: string, toDate: string): Promise<Lead[]> {
-  const leads: Lead[] = [];
-  try {
-    const url = `https://www.courtlistener.com/api/rest/v4/dockets/?court=scd&date_filed__gte=${fromDate}&date_filed__lte=${toDate}&nature_of_suit=290&order_by=-date_filed&page_size=50`;
-    const res = await fetchWithRetry(url, { headers: { "User-Agent": "Atlas/1.0", Accept: "application/json" } });
-    if (res.ok) {
-      const data = await res.json() as { results?: unknown[] };
-      for (const r of (data?.results || []) as Record<string, unknown>[]) {
-        const caseName = String(r.case_name || "");
-        const caseNum = String(r.docket_number || "");
-        const filedDate = String(r.date_filed || "");
-        if (!caseName && !caseNum) continue;
-        leads.push({ id: makeId("OOS", caseNum || caseName, "SC", "oos"), county: "SC", state: "SC", lead_type: "Vacant/Abandoned", owner_name: caseName || null, address: null, city: null, zip: null, mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null, case_number: caseNum || null, filing_date: formatDate(filedDate), assessed_value: null, tax_year: null, lender: null, loan_amount: null, sale_date: null, sale_amount: null, description: `Out-of-State Owner — ${caseName || caseNum}`, source_url: r.absolute_url ? `https://www.courtlistener.com${r.absolute_url}` : "https://www.courtlistener.com/", raw_data: JSON.stringify({ caseName, caseNum, filedDate }) });
-      }
-    }
-  } catch (e) { console.error("[SC] Out-of-State Owners error:", e); }
-  return leads;
-}
-
-// ─── VACANT / ABANDONED — South Carolina PACER BK RSS ──────────────────────────
-export async function scrapeVacantAbandoned(fromDate: string, toDate: string): Promise<Lead[]> {
-  const leads: Lead[] = [];
-  try {
-    const rssRes = await fetchWithRetry("https://ecf.scb.uscourts.gov/cgi-bin/rss_outside.pl");
-    if (rssRes.ok) {
-      const xml = await rssRes.text();
-      const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-      for (const item of items) {
-        const title = (item.match(/<title><!\[CDATA\[(.+?)\]\]><\/title>/) || item.match(/<title>(.+?)<\/title>/))?.[1]?.trim() || "";
-        const link = (item.match(/<link>(.+?)<\/link>/))?.[1]?.trim() || "";
-        const pubDate = (item.match(/<pubDate>(.+?)<\/pubDate>/))?.[1]?.trim() || "";
-        const desc = (item.match(/<description><!\[CDATA\[(.+?)\]\]><\/description>/) || item.match(/<description>(.+?)<\/description>/))?.[1]?.trim() || "";
-        if (!title) continue;
-        const lower = (title + " " + desc).toLowerCase();
-        if (!lower.includes("chapter 7") && !lower.includes("vacant") && !lower.includes("abandon")) continue;
-        leads.push({ id: makeId("VAC", title, "SC", "vacant"), county: "SC", state: "SC", lead_type: "Vacant/Abandoned", owner_name: title.split(/\s+v\.?\s+/i)[0]?.trim() || title, address: null, city: null, zip: null, mailing_address: null, mailing_city: null, mailing_state: null, mailing_zip: null, case_number: null, filing_date: pubDate ? formatDate(new Date(pubDate).toISOString().slice(0,10)) : formatDate(fromDate), assessed_value: null, tax_year: null, lender: null, loan_amount: null, sale_date: null, sale_amount: null, description: `Vacant/Abandoned — Chapter 7 — ${title}`, source_url: link || "https://ecf.scb.uscourts.gov/cgi-bin/rss_outside.pl", raw_data: JSON.stringify({ title, pubDate, desc }) });
-      }
-    }
-  } catch (e) { console.error("[SC] Vacant/Abandoned error:", e); }
+  } catch (e) {
+    console.error("[SC] Divorce/Eviction RSS error:", e);
+  }
   return leads;
 }
 
